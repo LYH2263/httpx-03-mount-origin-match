@@ -127,6 +127,39 @@ def test_get_environment_proxies(environment, proxies):
         ("http://", "https://example.com", False),
         ("all://", "https://example.com:123", True),
         ("", "https://example.com:123", True),
+        # A pattern without a port matches on any port.
+        ("http://example.com", "http://example.com:8080", True),
+        ("http://example.com", "http://example.com:443", True),
+        # An explicitly written default port only matches the default port,
+        # which the URL class normalizes to having no port.
+        ("https://example.com:443", "https://example.com", True),
+        ("https://example.com:443", "https://example.com:443", True),
+        ("https://example.com:443", "https://example.com:8443", False),
+        ("http://example.com:80", "http://example.com", True),
+        ("http://example.com:80", "http://example.com:8080", False),
+        ("http://example.com:443", "http://example.com", False),
+        ("http://example.com:443", "http://example.com:443", True),
+        # Default ports for the websocket schemes.
+        ("ws://example.com:80", "ws://example.com", True),
+        ("ws://example.com:80", "ws://example.com:8080", False),
+        ("wss://example.com:443", "wss://example.com", True),
+        ("wss://example.com:443", "wss://example.com:9000", False),
+        # IPv6 hosts compare the address itself, without the brackets.
+        ("https://[::1]:443", "https://[::1]", True),
+        ("https://[::1]:443", "https://[::1]:8443", False),
+        ("https://[::1]", "https://[::1]:8443", True),
+        # "*.example.com" matches subdomains but not the apex domain.
+        ("http://*.example.com", "http://www.example.com", True),
+        ("http://*.example.com", "http://example.com", False),
+        # "*example.com" matches both subdomains and the apex domain.
+        ("http://*example.com", "http://www.example.com", True),
+        ("http://*example.com", "http://example.com", True),
+        ("http://*example.com", "http://wwwexample.com", False),
+        # Host comparison is case insensitive and IDNA/unicode aware.
+        ("http://EXAMPLE.com", "http://example.com", True),
+        ("http://example.com", "http://EXAMPLE.com", True),
+        ("https://xn--mller-kva.de", "https://müller.de", True),
+        ("https://müller.de", "https://xn--mller-kva.de", True),
     ],
 )
 def test_url_matches(pattern, url, expected):
@@ -140,11 +173,19 @@ def test_pattern_priority():
         URLPattern("http://"),
         URLPattern("http://example.com"),
         URLPattern("http://example.com:123"),
+        URLPattern("http://www.example.com:123"),
+        URLPattern("http://www.example.com"),
+        URLPattern("http://*example.com"),
+        URLPattern("http://*.example.com"),
     ]
     random.shuffle(matchers)
     assert sorted(matchers) == [
+        URLPattern("http://www.example.com:123"),
         URLPattern("http://example.com:123"),
+        URLPattern("http://www.example.com"),
         URLPattern("http://example.com"),
+        URLPattern("http://*.example.com"),
+        URLPattern("http://*example.com"),
         URLPattern("http://"),
         URLPattern("all://"),
     ]

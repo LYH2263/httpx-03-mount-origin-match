@@ -298,6 +298,52 @@ def test_context_managed_transport_and_mount():
     ]
 
 
+def test_shared_transport_only_closed_once():
+    class Transport(httpx.BaseTransport):
+        def __init__(self) -> None:
+            self.events: list[str] = []
+
+        def handle_request(self, request: httpx.Request) -> httpx.Response:
+            raise NotImplementedError  # pragma: no cover
+
+        def close(self) -> None:
+            self.events.append("close")
+
+        def __enter__(self):
+            self.events.append("__enter__")
+            return self
+
+        def __exit__(self, *args):
+            super().__exit__(*args)
+            self.events.append("__exit__")
+
+    shared = Transport()
+    other = Transport()
+
+    # The same transport is used as the client default and on two mounts.
+    with httpx.Client(
+        transport=shared,
+        mounts={
+            "http://a.example": shared,
+            "http://b.example": shared,
+            "http://c.example": other,
+        },
+    ):
+        pass
+
+    assert shared.events == ["__enter__", "close", "__exit__"]
+    assert other.events == ["__enter__", "close", "__exit__"]
+
+    # Calling `.close()` directly must also only close a shared transport once.
+    shared = Transport()
+    client = httpx.Client(
+        transport=shared,
+        mounts={"http://a.example": shared, "http://b.example": shared},
+    )
+    client.close()
+    assert shared.events == ["close"]
+
+
 def hello_world(request):
     return httpx.Response(200, text="Hello, world!")
 

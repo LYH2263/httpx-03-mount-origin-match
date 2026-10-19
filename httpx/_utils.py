@@ -7,9 +7,28 @@ import typing
 from urllib.request import getproxies
 
 from ._types import PrimitiveData
+from ._urlparse import AUTHORITY_REGEX, DEFAULT_PORTS, URL_REGEX
 
 if typing.TYPE_CHECKING:  # pragma: no cover
     from ._urls import URL
+
+
+def _explicit_pattern_port(pattern: str) -> int | None:
+    """
+    Return the port written explicitly in a URL pattern string, or `None`
+    if the pattern does not include a port.
+
+    Unlike `URL(pattern).port` this does not normalize the scheme's default
+    port (eg. 80 for http, 443 for https) to `None`, which lets us tell
+    "https://example.com" apart from "https://example.com:443".
+    """
+    url_match = URL_REGEX.match(pattern)
+    assert url_match is not None
+    authority = url_match.groupdict()["authority"] or ""
+    authority_match = AUTHORITY_REGEX.match(authority)
+    assert authority_match is not None
+    port = authority_match.groupdict()["port"]
+    return int(port) if port else None
 
 
 def primitive_value_to_str(value: PrimitiveData) -> str:
@@ -157,6 +176,19 @@ class URLPattern:
     True
     >>> pattern.matches(httpx.URL("https://example.com"))
     False
+
+    # An omitted port matches any port...
+    >>> pattern = URLPattern("https://example.com")
+    >>> pattern.matches(httpx.URL("https://example.com:8443"))
+    True
+
+    # An explicitly given default port only matches the default port form,
+    # which the URL class normalizes to having no port...
+    >>> pattern = URLPattern("https://example.com:443")
+    >>> pattern.matches(httpx.URL("https://example.com"))
+    True
+    >>> pattern.matches(httpx.URL("https://example.com:8443"))
+    False
     """
 
     def __init__(self, pattern: str) -> None:
@@ -173,21 +205,31 @@ class URLPattern:
         self.pattern = pattern
         self.scheme = "" if url.scheme == "all" else url.scheme
         self.host = "" if url.host == "*" else url.host
-        self.port = url.port
+        # `URL` normalizes a scheme's default port to `None`, so inspect the
+        # raw pattern string to distinguish a pattern without any port
+        # (which should match on any port) from a pattern that explicitly
+        # gives the scheme's default port (which should only match that
+        # port).
+        self.port = _explicit_pattern_port(pattern)
         if not url.host or url.host == "*":
+            # No host constraint, eg. "all://" or "http://*".
             self.host_regex: typing.Pattern[str] | None = None
+            self._host_priority = (3, 0)
         elif url.host.startswith("*."):
             # *.example.com should match "www.example.com", but not "example.com"
             domain = re.escape(url.host[2:])
             self.host_regex = re.compile(f"^.+\\.{domain}$")
+            self._host_priority = (1, -len(self.host))
         elif url.host.startswith("*"):
             # *example.com should match "www.example.com" and "example.com"
             domain = re.escape(url.host[1:])
             self.host_regex = re.compile(f"^(.+\\.)?{domain}$")
+            self._host_priority = (2, -len(self.host))
         else:
             # example.com should match "example.com" but not "www.example.com"
             domain = re.escape(url.host)
             self.host_regex = re.compile(f"^{domain}$")
+            self._host_priority = (0, -len(self.host))
 
     def matches(self, other: URL) -> bool:
         if self.scheme and self.scheme != other.scheme:
@@ -198,23 +240,39 @@ class URLPattern:
             and not self.host_regex.match(other.host)
         ):
             return False
-        if self.port is not None and self.port != other.port:
-            return False
+        if self.port is not None:
+            # The pattern constrains the origin port exactly. Request URLs
+            # have their scheme's default port normalized to `None`, so use
+            # the request URL's effective port when comparing.
+            other_port = other.port
+            if other_port is None:
+                other_port = DEFAULT_PORTS.get(other.scheme)
+            if self.port != other_port:
+                return False
         return True
 
     @property
-    def priority(self) -> tuple[int, int, int]:
+    def priority(self) -> tuple[int, int, int, int]:
         """
         The priority allows URLPattern instances to be sortable, so that
         we can match from most specific to least specific.
         """
-        # URLs with a port should take priority over URLs without a port.
+        # Patterns with an explicit port should take priority over patterns
+        # without a port. Note this includes explicitly written default
+        # ports such as "http://example.com:80".
         port_priority = 0 if self.port is not None else 1
-        # Longer hostnames should match first.
-        host_priority = -len(self.host)
-        # Longer schemes should match first.
-        scheme_priority = -len(self.scheme)
-        return (port_priority, host_priority, scheme_priority)
+        # Exact hosts match before wildcard hosts, and longer hosts match
+        # before shorter hosts. "*.example.com" is more specific than
+        # "*example.com", since the latter also matches the apex domain.
+        host_kind_priority, host_length_priority = self._host_priority
+        # A concrete scheme matches before "all".
+        scheme_priority = 0 if self.scheme else 1
+        return (
+            port_priority,
+            host_kind_priority,
+            host_length_priority,
+            scheme_priority,
+        )
 
     def __hash__(self) -> int:
         return hash(self.pattern)

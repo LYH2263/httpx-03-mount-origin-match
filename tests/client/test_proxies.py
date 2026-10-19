@@ -59,6 +59,56 @@ PROXY_URL = "http://[::1]"
         ("http://example.com", {"http://example.com:80": PROXY_URL}, PROXY_URL),
         ("http://example.com:8080", {"http://example.com:8080": PROXY_URL}, PROXY_URL),
         ("http://example.com:8080", {"http://example.com": PROXY_URL}, PROXY_URL),
+        # An explicitly written default port only matches the default port
+        # origin, which URLs normalize to having no port.
+        ("https://example.com", {"https://example.com:443": PROXY_URL}, PROXY_URL),
+        (
+            "https://example.com:443",
+            {"https://example.com:443": PROXY_URL},
+            PROXY_URL,
+        ),
+        ("https://example.com:8443", {"https://example.com:443": PROXY_URL}, None),
+        ("http://example.com:8080", {"http://example.com:80": PROXY_URL}, None),
+        # The same rules apply to IPv6 hosts.
+        ("https://[::1]", {"https://[::1]:443": PROXY_URL}, PROXY_URL),
+        ("https://[::1]:8443", {"https://[::1]:443": PROXY_URL}, None),
+        # A pattern with an explicit port is more specific than one without.
+        (
+            "https://example.com",
+            {
+                "https://example.com": PROXY_URL + ":1",
+                "https://example.com:443": PROXY_URL + ":2",
+            },
+            PROXY_URL + ":2",
+        ),
+        # "*.example.com" is more specific than "*example.com".
+        (
+            "https://www.example.com",
+            {
+                "https://*example.com": PROXY_URL + ":1",
+                "https://*.example.com": PROXY_URL + ":2",
+            },
+            PROXY_URL + ":2",
+        ),
+        # An exact host is more specific than a suffix wildcard.
+        (
+            "https://example.com",
+            {
+                "https://*example.com": PROXY_URL + ":1",
+                "https://example.com": PROXY_URL + ":2",
+            },
+            PROXY_URL + ":2",
+        ),
+        # A default-port pattern must not shadow other ports, even with a
+        # wildcard scheme mount present.
+        (
+            "https://example.com:8443",
+            {
+                "all://": PROXY_URL + ":1",
+                "https://example.com:443": PROXY_URL + ":2",
+            },
+            PROXY_URL + ":1",
+        ),
         (
             "http://example.com",
             {
@@ -263,3 +313,61 @@ def test_proxy_with_mounts():
 
     transport = client._transport_for_url(httpx.URL("http://example.com"))
     assert transport == proxy_transport
+
+
+def _redirect_mounts(hits: list[str]) -> dict[str, httpx.MockTransport]:
+    def first(request: httpx.Request) -> httpx.Response:
+        hits.append(f"first {request.url}")
+        return httpx.Response(
+            302, headers={"location": "https://other.example:8443/ok"}
+        )
+
+    def second(request: httpx.Request) -> httpx.Response:
+        hits.append(f"second {request.url}")
+        return httpx.Response(200)
+
+    return {
+        "https://example.com": httpx.MockTransport(first),
+        "https://other.example:8443": httpx.MockTransport(second),
+    }
+
+
+def _default_transport(hits: list[str]) -> httpx.MockTransport:
+    def default(request: httpx.Request) -> httpx.Response:
+        hits.append(f"default {request.url}")
+        return httpx.Response(200)
+
+    return httpx.MockTransport(default)
+
+
+def test_transport_reselected_on_redirect():
+    hits: list[str] = []
+    with httpx.Client(
+        transport=_default_transport(hits),
+        mounts=_redirect_mounts(hits),
+        follow_redirects=True,
+    ) as client:
+        response = client.get("https://example.com/start")
+
+    assert response.status_code == 200
+    assert hits == [
+        "first https://example.com/start",
+        "second https://other.example:8443/ok",
+    ]
+
+
+@pytest.mark.anyio
+async def test_async_transport_reselected_on_redirect():
+    hits: list[str] = []
+    async with httpx.AsyncClient(
+        transport=_default_transport(hits),
+        mounts=_redirect_mounts(hits),
+        follow_redirects=True,
+    ) as client:
+        response = await client.get("https://example.com/start")
+
+    assert response.status_code == 200
+    assert hits == [
+        "first https://example.com/start",
+        "second https://other.example:8443/ok",
+    ]

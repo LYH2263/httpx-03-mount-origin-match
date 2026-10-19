@@ -154,6 +154,9 @@ COMPONENT_REGEX = {
 IPv4_STYLE_HOSTNAME = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$")
 IPv6_STYLE_HOSTNAME = re.compile(r"^\[.*\]$")
 
+# See https://url.spec.whatwg.org/#url-miscellaneous
+DEFAULT_PORTS = {"ftp": 21, "http": 80, "https": 443, "ws": 80, "wss": 443}
+
 
 class ParseResult(typing.NamedTuple):
     scheme: str
@@ -411,9 +414,7 @@ def normalize_port(port: str | int | None, scheme: str) -> int | None:
         raise InvalidURL(f"Invalid port: {port!r}")
 
     # See https://url.spec.whatwg.org/#url-miscellaneous
-    default_port = {"ftp": 21, "http": 80, "https": 443, "ws": 80, "wss": 443}.get(
-        scheme
-    )
+    default_port = DEFAULT_PORTS.get(scheme)
     if port_as_int == default_port:
         return None
     return port_as_int

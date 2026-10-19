@@ -252,6 +252,53 @@ async def test_context_managed_transport_and_mount():
     ]
 
 
+@pytest.mark.anyio
+async def test_shared_transport_only_closed_once():
+    class Transport(httpx.AsyncBaseTransport):
+        def __init__(self) -> None:
+            self.events: list[str] = []
+
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            raise NotImplementedError  # pragma: no cover
+
+        async def aclose(self) -> None:
+            self.events.append("aclose")
+
+        async def __aenter__(self):
+            self.events.append("__aenter__")
+            return self
+
+        async def __aexit__(self, *args):
+            await super().__aexit__(*args)
+            self.events.append("__aexit__")
+
+    shared = Transport()
+    other = Transport()
+
+    # The same transport is used as the client default and on two mounts.
+    async with httpx.AsyncClient(
+        transport=shared,
+        mounts={
+            "http://a.example": shared,
+            "http://b.example": shared,
+            "http://c.example": other,
+        },
+    ):
+        pass
+
+    assert shared.events == ["__aenter__", "aclose", "__aexit__"]
+    assert other.events == ["__aenter__", "aclose", "__aexit__"]
+
+    # Calling `.aclose()` directly must also only close a shared transport once.
+    shared = Transport()
+    client = httpx.AsyncClient(
+        transport=shared,
+        mounts={"http://a.example": shared, "http://b.example": shared},
+    )
+    await client.aclose()
+    assert shared.events == ["aclose"]
+
+
 def hello_world(request):
     return httpx.Response(200, text="Hello, world!")
 

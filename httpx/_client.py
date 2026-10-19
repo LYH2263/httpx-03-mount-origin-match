@@ -58,6 +58,27 @@ __all__ = ["USE_CLIENT_DEFAULT", "AsyncClient", "Client"]
 T = typing.TypeVar("T", bound="Client")
 U = typing.TypeVar("U", bound="AsyncClient")
 
+TransportType = typing.TypeVar("TransportType", BaseTransport, AsyncBaseTransport)
+
+
+def _unique_transports(
+    transport: TransportType,
+    mounts: typing.Iterable[TransportType | None],
+) -> list[TransportType]:
+    """
+    Return the client's default transport together with all the transports
+    referenced by the mounts, skipping any `None` values and de-duplicating
+    objects that are shared between mounts (or between a mount and the
+    default transport), so each transport is only entered/closed once.
+    """
+    seen: set[int] = {id(transport)}
+    transports: list[TransportType] = [transport]
+    for candidate in mounts:
+        if candidate is not None and id(candidate) not in seen:
+            seen.add(id(candidate))
+            transports.append(candidate)
+    return transports
+
 
 def _is_https_redirect(url: URL, location: URL) -> bool:
     """
@@ -1267,10 +1288,8 @@ class Client(BaseClient):
         if self._state != ClientState.CLOSED:
             self._state = ClientState.CLOSED
 
-            self._transport.close()
-            for transport in self._mounts.values():
-                if transport is not None:
-                    transport.close()
+            for transport in _unique_transports(self._transport, self._mounts.values()):
+                transport.close()
 
     def __enter__(self: T) -> T:
         if self._state != ClientState.UNOPENED:
@@ -1284,10 +1303,8 @@ class Client(BaseClient):
 
         self._state = ClientState.OPENED
 
-        self._transport.__enter__()
-        for transport in self._mounts.values():
-            if transport is not None:
-                transport.__enter__()
+        for transport in _unique_transports(self._transport, self._mounts.values()):
+            transport.__enter__()
         return self
 
     def __exit__(
@@ -1298,10 +1315,8 @@ class Client(BaseClient):
     ) -> None:
         self._state = ClientState.CLOSED
 
-        self._transport.__exit__(exc_type, exc_value, traceback)
-        for transport in self._mounts.values():
-            if transport is not None:
-                transport.__exit__(exc_type, exc_value, traceback)
+        for transport in _unique_transports(self._transport, self._mounts.values()):
+            transport.__exit__(exc_type, exc_value, traceback)
 
 
 class AsyncClient(BaseClient):
@@ -1982,10 +1997,8 @@ class AsyncClient(BaseClient):
         if self._state != ClientState.CLOSED:
             self._state = ClientState.CLOSED
 
-            await self._transport.aclose()
-            for proxy in self._mounts.values():
-                if proxy is not None:
-                    await proxy.aclose()
+            for transport in _unique_transports(self._transport, self._mounts.values()):
+                await transport.aclose()
 
     async def __aenter__(self: U) -> U:
         if self._state != ClientState.UNOPENED:
@@ -1999,10 +2012,8 @@ class AsyncClient(BaseClient):
 
         self._state = ClientState.OPENED
 
-        await self._transport.__aenter__()
-        for proxy in self._mounts.values():
-            if proxy is not None:
-                await proxy.__aenter__()
+        for transport in _unique_transports(self._transport, self._mounts.values()):
+            await transport.__aenter__()
         return self
 
     async def __aexit__(
@@ -2013,7 +2024,5 @@ class AsyncClient(BaseClient):
     ) -> None:
         self._state = ClientState.CLOSED
 
-        await self._transport.__aexit__(exc_type, exc_value, traceback)
-        for proxy in self._mounts.values():
-            if proxy is not None:
-                await proxy.__aexit__(exc_type, exc_value, traceback)
+        for transport in _unique_transports(self._transport, self._mounts.values()):
+            await transport.__aexit__(exc_type, exc_value, traceback)
